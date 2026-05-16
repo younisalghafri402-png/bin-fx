@@ -1,1 +1,12 @@
-# Pines Bot Project
+# 🚀 Gold Scalping Bot (XAUUSDT)
+
+بوت سكالبنج للذهب باستخدام عدم توازن عمق السوق (Order Book Imbalance) مع إشارات عبر تليجرام.
+
+## المتطلبات
+- Python 3.11+
+- `aiohttp`
+
+## التشغيل محلياً
+```bash
+pip install -r requirements.txt
+python bot.py

@@ -1,9 +1,11 @@
 import asyncio
 import aiohttp
-from datetime import datetime
 from aiohttp import web
 import json
 import os
+import requests
+from datetime import datetime
+import threading
 
 # =============================================
 # 1. إعدادات التحليل
@@ -15,7 +17,7 @@ IMBALANCE_THRESHOLD = 0.80
 # =============================================
 # 2. إعدادات الهدف والستوب
 # =============================================
-TP_POINTS = 100  # نقاط
+TP_POINTS = 100
 SL_POINTS = 100
 
 # =============================================
@@ -30,53 +32,48 @@ TELEGRAM_CHAT_ID = "-1003952441740"
 current_trade = {
     "active": False,
     "type": None,
-    "entry_price": 0,
-    "tp": 0,
-    "sl": 0,
+    "entry_price": 0.0,
+    "tp": 0.0,
+    "sl": 0.0,
     "tp_hit": False,
     "sl_hit": False
 }
 
-# إحصائيات عامة
 stats = {
-    "total_trades": 0,      # إجمالي الصفقات التي دخلناها
-    "wins": 0,              # ضرب الهدف
-    "losses": 0,            # ضرب الستوب
-    "last_signal_time": None,
-    "current_imbalance": 0.5,
+    "total_trades": 0,
+    "wins": 0,
+    "losses": 0,
     "current_price": 0.0,
-    "bid_volume": 0.0,      # إجمالي حجم المشترين (أول 10 مستويات)
-    "ask_volume": 0.0,      # إجمالي حجم البائعين
+    "current_imbalance": 0.5,
+    "bid_volume": 0.0,
+    "ask_volume": 0.0
 }
 
 # =============================================
-# 5. جلب البيانات من Binance Futures
+# 5. جلب البيانات من Binance (باستخدام requests)
 # =============================================
-async def fetch_order_book(session):
+def fetch_order_book_sync():
+    """جلب عمق السوق بشكل متزامن"""
     url = f"https://fapi.binance.com/fapi/v1/depth?symbol={SYMBOL}&limit={DEPTH_LIMIT}"
     try:
-        async with session.get(url, timeout=5) as response:
-            if response.status == 200:
-                return await response.json()
-            else:
-                print(f"خطأ في جلب العمق: HTTP {response.status}")
-    except asyncio.TimeoutError:
-        print("انتهى الوقت المحدد لجلب العمق")
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            return response.json()
+        else:
+            print(f"خطأ في جلب العمق: HTTP {response.status_code}")
     except Exception as e:
         print(f"خطأ في جلب العمق: {e}")
     return None
 
-async def get_current_price(session):
+def get_current_price_sync():
+    """جلب السعر الحالي بشكل متزامن"""
     url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={SYMBOL}"
     try:
-        async with session.get(url, timeout=5) as response:
-            if response.status == 200:
-                data = await response.json()
-                return float(data['price'])
-            else:
-                print(f"خطأ في جلب السعر: HTTP {response.status}")
-    except asyncio.TimeoutError:
-        print("انتهى الوقت المحدد لجلب السعر")
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            return float(response.json()['price'])
+        else:
+            print(f"خطأ في جلب السعر: HTTP {response.status_code}")
     except Exception as e:
         print(f"خطأ في جلب السعر: {e}")
     return None
@@ -85,16 +82,15 @@ def calculate_imbalance_and_volumes(order_book):
     """حساب عدم التوازن وحجم المشترين والبائعين"""
     bids = order_book.get('bids', [])
     asks = order_book.get('asks', [])
-    total_bid = sum(float(b[1]) for b in bids[:5])
-    total_ask = sum(float(a[1]) for a in asks[:5])
-    total = total_bid + total_ask
-    imbalance = total_bid / total if total > 0 else 0.5
+    total_bid_5 = sum(float(b[1]) for b in bids[:5])
+    total_ask_5 = sum(float(a[1]) for a in asks[:5])
+    total = total_bid_5 + total_ask_5
+    imbalance = total_bid_5 / total if total > 0 else 0.5
     
-    # حساب الحجم الإجمالي لأول DEPTH_LIMIT مستوى
-    full_bid_vol = sum(float(b[1]) for b in bids[:DEPTH_LIMIT])
-    full_ask_vol = sum(float(a[1]) for a in asks[:DEPTH_LIMIT])
-    
-    return imbalance, full_bid_vol, full_ask_vol
+    # الحجم الكلي لأول DEPTH_LIMIT مستوى
+    full_bid = sum(float(b[1]) for b in bids[:DEPTH_LIMIT])
+    full_ask = sum(float(a[1]) for a in asks[:DEPTH_LIMIT])
+    return imbalance, full_bid, full_ask
 
 def calculate_sltp(signal, current_price):
     if signal == "BUY":
@@ -109,19 +105,18 @@ def generate_signal(imbalance, current_price):
     if imbalance > IMBALANCE_THRESHOLD:
         signal = "BUY"
         sl, tp = calculate_sltp("BUY", current_price)
-        reason = f"طلب مرتفع جداً {imbalance*100:.0f}%"
-        return signal, sl, tp, reason
+        return signal, sl, tp, f"طلب مرتفع {imbalance*100:.0f}%"
     elif imbalance < (1 - IMBALANCE_THRESHOLD):
         signal = "SELL"
         sl, tp = calculate_sltp("SELL", current_price)
-        reason = f"عرض مرتفع جداً {(1-imbalance)*100:.0f}%"
-        return signal, sl, tp, reason
+        return signal, sl, tp, f"عرض مرتفع {(1-imbalance)*100:.0f}%"
     return None, None, None, None
 
 # =============================================
-# 6. إرسال إلى تليجرام
+# 6. إرسال إلى تليجرام (باستخدام requests)
 # =============================================
-async def send_telegram_message(session, message):
+def send_telegram_message_sync(message):
+    """إرسال رسالة إلى تليجرام بشكل متزامن"""
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -129,9 +124,9 @@ async def send_telegram_message(session, message):
         "parse_mode": "Markdown"
     }
     try:
-        async with session.post(url, json=payload, timeout=5) as resp:
-            if resp.status != 200:
-                print(f"فشل الإرسال: {await resp.text()}")
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code != 200:
+            print(f"فشل إرسال التليجرام: {resp.text}")
     except Exception as e:
         print(f"خطأ في إرسال التليجرام: {e}")
 
@@ -140,61 +135,138 @@ def format_signal_message(symbol, signal, entry, sl, tp, reason, imbalance):
     action = "شراء" if signal == "BUY" else "بيع"
     return f"""{arrow} *{symbol}* {action} {entry:.2f}
 
-🥇 TP1: {tp:.2f}
+🥇 TP: {tp:.2f}
 🛑 SL: {sl:.2f}
 
 📊 عدم توازن: {imbalance:.2f}
 💡 {reason}"""
 
 # =============================================
-# 7. مراقبة الصفقة وتحديث الإحصائيات
+# 7. تحديث الإحصائيات بشكل دوري
 # =============================================
-async def monitor_current_trade(session):
+async def update_stats_loop():
+    """تحديث بيانات السوق كل ثانية في الخلفية"""
+    global stats
+    while True:
+        try:
+            # جلب البيانات (متزامن لكن في thread منفصل)
+            order_book = await asyncio.to_thread(fetch_order_book_sync)
+            current_price = await asyncio.to_thread(get_current_price_sync)
+            if order_book and current_price:
+                imbalance, bid_vol, ask_vol = calculate_imbalance_and_volumes(order_book)
+                stats["current_price"] = current_price
+                stats["current_imbalance"] = imbalance
+                stats["bid_volume"] = bid_vol
+                stats["ask_volume"] = ask_vol
+        except Exception as e:
+            print(f"خطأ في حلقة التحديث: {e}")
+        await asyncio.sleep(1)
+
+# =============================================
+# 8. مراقبة الصفقة الحالية (تحقق من السعر كل ثانية)
+# =============================================
+async def monitor_trade_loop():
     global current_trade, stats
     while True:
         if current_trade["active"]:
-            current_price = await get_current_price(session)
-            if current_price:
+            current_price = stats["current_price"]  # نستخدم آخر سعر معروف
+            if current_price > 0:
                 trade_type = current_trade["type"]
                 tp = current_trade["tp"]
                 sl = current_trade["sl"]
                 
-                # ضرب الهدف
-                if trade_type == "BUY" and current_price >= tp and not current_trade["tp_hit"]:
-                    current_trade["tp_hit"] = True
-                    current_trade["active"] = False
-                    stats["wins"] += 1
-                    await send_telegram_message(session, f"✅ *TP1 {SYMBOL} DONE* 🥇")
-                    print(f"🎯 ضرب الهدف عند {current_price}")
-                elif trade_type == "SELL" and current_price <= tp and not current_trade["tp_hit"]:
-                    current_trade["tp_hit"] = True
-                    current_trade["active"] = False
-                    stats["wins"] += 1
-                    await send_telegram_message(session, f"✅ *TP1 {SYMBOL} DONE* 🥇")
-                    print(f"🎯 ضرب الهدف عند {current_price}")
-                
-                # ضرب الستوب
-                if trade_type == "BUY" and current_price <= sl and not current_trade["sl_hit"]:
-                    current_trade["sl_hit"] = True
-                    current_trade["active"] = False
-                    stats["losses"] += 1
-                    await send_telegram_message(session, f"🛑 *SL Hit {SYMBOL}*")
-                    print(f"🛑 ضرب الستوب عند {current_price}")
-                elif trade_type == "SELL" and current_price >= sl and not current_trade["sl_hit"]:
-                    current_trade["sl_hit"] = True
-                    current_trade["active"] = False
-                    stats["losses"] += 1
-                    await send_telegram_message(session, f"🛑 *SL Hit {SYMBOL}*")
-                    print(f"🛑 ضرب الستوب عند {current_price}")
+                if trade_type == "BUY":
+                    if current_price >= tp and not current_trade["tp_hit"]:
+                        current_trade["tp_hit"] = True
+                        current_trade["active"] = False
+                        stats["wins"] += 1
+                        await asyncio.to_thread(send_telegram_message_sync, f"✅ *TP1 {SYMBOL} DONE* 🥇")
+                        print(f"🎯 ضرب الهدف عند {current_price}")
+                    elif current_price <= sl and not current_trade["sl_hit"]:
+                        current_trade["sl_hit"] = True
+                        current_trade["active"] = False
+                        stats["losses"] += 1
+                        await asyncio.to_thread(send_telegram_message_sync, f"🛑 *SL Hit {SYMBOL}*")
+                        print(f"🛑 ضرب الستوب عند {current_price}")
+                else:  # SELL
+                    if current_price <= tp and not current_trade["tp_hit"]:
+                        current_trade["tp_hit"] = True
+                        current_trade["active"] = False
+                        stats["wins"] += 1
+                        await asyncio.to_thread(send_telegram_message_sync, f"✅ *TP1 {SYMBOL} DONE* 🥇")
+                        print(f"🎯 ضرب الهدف عند {current_price}")
+                    elif current_price >= sl and not current_trade["sl_hit"]:
+                        current_trade["sl_hit"] = True
+                        current_trade["active"] = False
+                        stats["losses"] += 1
+                        await asyncio.to_thread(send_telegram_message_sync, f"🛑 *SL Hit {SYMBOL}*")
+                        print(f"🛑 ضرب الستوب عند {current_price}")
         await asyncio.sleep(1)
 
 # =============================================
-# 8. واجهة الويب (داشبورد وإحصائيات)
+# 9. الحلقة الرئيسية للتداول (توليد الإشارات عند نهاية شمعة الدقيقة)
 # =============================================
-async def handle_index(request):
-    """تقديم صفحة الويب الرئيسية"""
-    html_content = """
-<!DOCTYPE html>
+async def trading_loop():
+    global current_trade, stats
+    last_minute = None
+    last_signal_key = None
+    print("🚀 بوت السكالبنج - XAUUSDT (بيانات حقيقية)")
+    print(f"🎯 الهدف: {TP_POINTS} نقطة | 🛑 الستوب: {SL_POINTS} نقطة")
+    print("📌 ينتظر إشارات عند نهاية شمعة 1 دقيقة (عدم توازن 80%+)\n")
+
+    while True:
+        try:
+            now = datetime.now()
+            current_minute = now.replace(second=0, microsecond=0)
+            
+            # عرض في الطرفية
+            print(f"\r⏰ {now.strftime('%H:%M:%S')} | السعر: {stats['current_price']:.2f} | OBI: {stats['current_imbalance']:.2f}", end="")
+            
+            # عند انتهاء الشمعة
+            if last_minute is not None and current_minute != last_minute and not current_trade["active"]:
+                print(f"\n🔔 نهاية الشمعة {last_minute.strftime('%H:%M')} - التحقق من الإشارة...")
+                # جلب بيانات نهائية
+                order_book = await asyncio.to_thread(fetch_order_book_sync)
+                final_price = await asyncio.to_thread(get_current_price_sync)
+                if order_book and final_price:
+                    final_imbalance, _, _ = calculate_imbalance_and_volumes(order_book)
+                    signal, sl, tp, reason = generate_signal(final_imbalance, final_price)
+                    if signal:
+                        current_key = (signal, round(final_price, 1))
+                        if current_key != last_signal_key:
+                            # تحديث الإحصائيات
+                            stats["total_trades"] += 1
+                            # فتح صفقة جديدة
+                            current_trade = {
+                                "active": True,
+                                "type": signal,
+                                "entry_price": final_price,
+                                "tp": tp,
+                                "sl": sl,
+                                "tp_hit": False,
+                                "sl_hit": False
+                            }
+                            last_signal_key = current_key
+                            # إرسال إشارة تليجرام
+                            msg = format_signal_message(SYMBOL, signal, final_price, sl, tp, reason, final_imbalance)
+                            await asyncio.to_thread(send_telegram_message_sync, msg)
+                            print(f"\n🔔 إشارة {signal} | الدخل: {final_price:.2f} | TP: {tp:.2f} | SL: {sl:.2f}")
+                    else:
+                        print(f"⚖️ عدم توازن {final_imbalance:.2f} - لم يتجاوز العتبة {IMBALANCE_THRESHOLD}")
+                else:
+                    print("⚠️ فشل جلب البيانات عند نهاية الشمعة")
+            
+            last_minute = current_minute
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            print(f"\n⚠️ خطأ في حلقة التداول: {e}")
+            await asyncio.sleep(2)
+
+# =============================================
+# 10. واجهة الويب (HTML + JSON API)
+# =============================================
+async def index(request):
+    html = """<!DOCTYPE html>
 <html>
 <head>
     <title>Gold Scalping Bot Dashboard</title>
@@ -209,17 +281,19 @@ async def handle_index(request):
         .stat-box { background: #3a3a4a; border-radius: 10px; padding: 15px; text-align: center; }
         .stat-value { font-size: 28px; font-weight: bold; color: #ffd966; }
         .stat-label { font-size: 14px; opacity: 0.8; }
-        .trade-active { border-left: 5px solid #4caf50; background: #2a3a2a; }
+        .trade-active { border-left: 5px solid #4caf50; }
         .trade-inactive { border-left: 5px solid #f44336; }
         .badge { display: inline-block; padding: 4px 8px; border-radius: 20px; font-size: 12px; font-weight: bold; }
         .badge-buy { background: #4caf50; color: white; }
         .badge-sell { background: #f44336; color: white; }
         footer { text-align: center; margin-top: 30px; font-size: 12px; opacity: 0.6; }
+        .refresh { text-align: right; font-size: 12px; margin-bottom: 5px; }
     </style>
 </head>
 <body>
 <div class="container">
     <h1>🤖 XAUUSD Scalping Bot</h1>
+    <div class="refresh">تحديث تلقائي كل 1 ثانية | بيانات حقيقية من Binance</div>
     <div class="card">
         <div class="stats-grid">
             <div class="stat-box"><div class="stat-value" id="price">--</div><div class="stat-label">السعر الحالي</div></div>
@@ -241,7 +315,7 @@ async def handle_index(request):
         <h3>🔄 الصفقة الحالية</h3>
         <div id="tradeStatus">لا توجد صفقة مفتوحة</div>
     </div>
-    <footer>تحديث تلقائي كل 1 ثانية | البوت يعمل 24/7</footer>
+    <footer>🚀 الإشارات عند نهاية شمعة 1 دقيقة (عتبة 80%)</footer>
 </div>
 <script>
     async function fetchStats() {
@@ -278,14 +352,12 @@ async def handle_index(request):
     setInterval(fetchStats, 1000);
 </script>
 </body>
-</html>
-    """
-    return web.Response(text=html_content, content_type='text/html')
+</html>"""
+    return web.Response(text=html, content_type='text/html')
 
-async def handle_stats(request):
-    """إرجاع الإحصائيات بشكل JSON"""
-    global current_trade, stats
-    data = {
+async def stats_api(request):
+    """إرجاع الإحصائيات كـ JSON"""
+    return web.json_response({
         "current_price": stats["current_price"],
         "current_imbalance": stats["current_imbalance"],
         "bid_volume": stats["bid_volume"],
@@ -298,114 +370,35 @@ async def handle_stats(request):
         "entry_price": current_trade["entry_price"],
         "tp": current_trade["tp"],
         "sl": current_trade["sl"]
-    }
-    return web.json_response(data)
+    })
 
-async def start_web_server():
-    """تشغيل خادم الويب على المنفذ المحدد (بدون حظر)"""
+async def start_web():
     app = web.Application()
-    app.router.add_get('/', handle_index)
-    app.router.add_get('/stats', handle_stats)
+    app.router.add_get('/', index)
+    app.router.add_get('/stats', stats_api)
     runner = web.AppRunner(app)
     await runner.setup()
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
     print(f"✅ واجهة الويب تعمل على http://0.0.0.0:{port}")
+    # يبقى خادم الويب مفتوحاً إلى الأبد
+    await asyncio.Event().wait()
 
 # =============================================
-# 9. الحلقة الرئيسية للتداول
+# 11. التشغيل الرئيسي
 # =============================================
 async def main():
-    global current_trade, stats
-    print(f"🚀 بوت السكالبنج - {SYMBOL}")
-    print(f"🎯 الهدف: {TP_POINTS} نقطة | 🛑 الستوب: {SL_POINTS} نقطة")
-    print("📌 ينتظر إشارات عند نهاية شمعة 1 دقيقة (عدم توازن 80%+)\n")
-    
-    async with aiohttp.ClientSession() as session:
-        # إشعار بدء التشغيل في تليجرام
-        await send_telegram_message(session, f"🤖 *بوت السكالبنج قيد التشغيل*\n📊 {SYMBOL}\n🎯 الهدف: {TP_POINTS} نقطة | 🛑 الستوب: {SL_POINTS} نقطة\n⏱️ الإشارات عند انتهاء شمعة 1 دقيقة")
-        
-        # تشغيل مهام الخلفية
-        asyncio.create_task(monitor_current_trade(session))
-        
-        last_minute = None
-        last_signal_key = None
-        
-        while True:
-            try:
-                # جلب البيانات الحالية للسوق
-                order_book = await fetch_order_book(session)
-                current_price = await get_current_price(session)
-                
-                if order_book is None or current_price is None:
-                    await asyncio.sleep(0.5)
-                    continue
-                
-                # تحديث الإحصائيات الحية
-                imbalance, bid_vol, ask_vol = calculate_imbalance_and_volumes(order_book)
-                stats["current_price"] = current_price
-                stats["current_imbalance"] = imbalance
-                stats["bid_volume"] = bid_vol
-                stats["ask_volume"] = ask_vol
-                
-                now = datetime.now()
-                current_minute = now.replace(second=0, microsecond=0)
-                
-                # عرض في الطرفية
-                print(f"\r⏰ {now.strftime('%H:%M:%S')} | السعر: {current_price:.2f} | OBI: {imbalance:.2f}", end="")
-                
-                # عند انتهاء شمعة الدقيقة
-                if last_minute is not None and current_minute != last_minute and not current_trade["active"]:
-                    print(f"\n🔔 نهاية الشمعة {last_minute.strftime('%H:%M')} - التحقق من الإشارة...")
-                    # جلب بيانات نهائية للشمعة
-                    final_book = await fetch_order_book(session)
-                    final_price = await get_current_price(session)
-                    if final_book and final_price:
-                        final_imbalance, _, _ = calculate_imbalance_and_volumes(final_book)
-                        signal, sl, tp, reason = generate_signal(final_imbalance, final_price)
-                        if signal:
-                            current_key = (signal, round(final_price, 1))
-                            if current_key != last_signal_key:
-                                # تحديث الإحصائيات
-                                stats["total_trades"] += 1
-                                stats["last_signal_time"] = now.isoformat()
-                                # فتح الصفقة
-                                current_trade = {
-                                    "active": True,
-                                    "type": signal,
-                                    "entry_price": final_price,
-                                    "tp": tp,
-                                    "sl": sl,
-                                    "tp_hit": False,
-                                    "sl_hit": False
-                                }
-                                last_signal_key = current_key
-                                # إرسال إلى تليجرام
-                                msg = format_signal_message(SYMBOL, signal, final_price, sl, tp, reason, final_imbalance)
-                                await send_telegram_message(session, msg)
-                                print(f"\n🔔 إشارة {signal} | الدخل: {final_price:.2f} | TP: {tp:.2f} | SL: {sl:.2f}")
-                        else:
-                            print(f"⚖️ عدم توازن {final_imbalance:.2f} - لم يتجاوز العتبة {IMBALANCE_THRESHOLD}")
-                
-                last_minute = current_minute
-                await asyncio.sleep(0.5)  # تحديث مرتين في الثانية
-                
-            except Exception as e:
-                print(f"\n⚠️ خطأ رئيسي: {e}")
-                await asyncio.sleep(2)
-
-# =============================================
-# 10. التشغيل المتزامن (التداول + الويب)
-# =============================================
-async def main_with_web():
-    # تشغيل خادم الويب في مهمة خلفية
-    web_task = asyncio.create_task(start_web_server())
-    # تشغيل بوت التداول
-    await main()
+    # تشغيل جميع الحلقات في وقت واحد
+    await asyncio.gather(
+        update_stats_loop(),
+        monitor_trade_loop(),
+        trading_loop(),
+        start_web()
+    )
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main_with_web())
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\n🛑 تم إيقاف البوت")

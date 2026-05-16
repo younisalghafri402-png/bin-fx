@@ -3,3 +3,6 @@ uvicorn[standard]
 aiohttp
 websockets
 wsproto
+fastapi
+aiohttp
+uvicorn

@@ -1,15 +1,16 @@
+
 """
 ╔══════════════════════════════════════════════════════════╗
-║         بوت السكالبنج — XAUUSDT / Binance Futures       ║
-║  ملف واحد: بوت + واجهة ويب + تليجرام + منع النوم 24/7   ║
-║  تشغيل: python bot.py                                    ║
+║ بوت السكالبنج — XAUUSDT / Binance Futures ║
+║ ملف واحد: بوت + واجهة ويب + تليجرام + منع النوم 24/7 ║
+║ تشغيل تلقائي + عرض الأسعار فوراً ║
+║ تشغيل: python bot.py ║
 ╚══════════════════════════════════════════════════════════╝
 """
 
 import asyncio
 import time
 import os
-import json
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from contextlib import asynccontextmanager
@@ -21,51 +22,51 @@ import uvicorn
 
 
 # ══════════════════════════════════════════════════════════
-#  الإعدادات — يمكن تغييرها عبر متغيرات البيئة
+# الإعدادات — يمكن تغييرها عبر متغيرات البيئة
 # ══════════════════════════════════════════════════════════
-SYMBOL              = os.getenv("SYMBOL",             "XAUUSDT")
-DEPTH_LIMIT         = 10
-IMBALANCE_THRESHOLD = float(os.getenv("IMBALANCE_THRESHOLD", "0.80"))   # 80%
-TP_POINTS           = int(os.getenv("TP_POINTS",      "100"))            # نقاط الهدف
-SL_POINTS           = int(os.getenv("SL_POINTS",      "100"))            # نقاط الستوب
-SIGNAL_COOLDOWN     = float(os.getenv("SIGNAL_COOLDOWN", "60"))          # ثواني بين إشارتين
-TELEGRAM_TOKEN      = os.getenv("TELEGRAM_BOT_TOKEN", "8292443875:AAHVG6THkf9zL2r-1B2DVUcUl4yfWXS52zg")
-TELEGRAM_CHAT_ID    = os.getenv("TELEGRAM_CHAT_ID",   "-1003952441740")
-RENDER_URL          = os.getenv("RENDER_EXTERNAL_URL", "")
-PORT                = int(os.getenv("PORT",           "8000"))
+SYMBOL = os.getenv("SYMBOL", "XAUUSDT")
+DEPTH_LIMIT = 10
+IMBALANCE_THRESHOLD = float(os.getenv("IMBALANCE_THRESHOLD", "0.80")) # 80%
+TP_POINTS = int(os.getenv("TP_POINTS", "100")) # نقاط الهدف
+SL_POINTS = int(os.getenv("SL_POINTS", "100")) # نقاط الستوب
+SIGNAL_COOLDOWN = float(os.getenv("SIGNAL_COOLDOWN", "60")) # ثواني بين إشارتين
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8292443875:AAHVG6THkf9zL2r-1B2DVUcUl4yfWXS52zg")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "-1003952441740")
+RENDER_URL = os.getenv("RENDER_EXTERNAL_URL", "")
+PORT = int(os.getenv("PORT", "8000"))
 
 
 # ══════════════════════════════════════════════════════════
-#  حالة البوت (في الذاكرة)
+# حالة البوت (في الذاكرة)
 # ══════════════════════════════════════════════════════════
-bot_running  = False
+bot_running = False
 bot_task: Optional[asyncio.Task] = None
 
 current_trade: Dict[str, Any] = {
-    "active":     False,
-    "type":       None,
+    "active": False,
+    "type": None,
     "entry_price": 0,
-    "tp":         0,
-    "sl":         0,
-    "tp_hit":     False,
-    "sl_hit":     False,
+    "tp": 0,
+    "sl": 0,
+    "tp_hit": False,
+    "sl_hit": False,
 }
 
 signals_history: List[Dict] = []
 
 live: Dict[str, Any] = {
-    "price":     0.0,
+    "price": 0.0,
     "imbalance": 0.5,
     "timestamp": "",
-    "status":    "stopped",
-    "trade":     {},
+    "status": "stopped",
+    "trade": {},
 }
 
 clients: List[WebSocket] = []
 
 
 # ══════════════════════════════════════════════════════════
-#  WebSocket — بث للجميع
+# WebSocket — بث للجميع
 # ══════════════════════════════════════════════════════════
 async def broadcast(data: dict):
     dead = []
@@ -80,7 +81,7 @@ async def broadcast(data: dict):
 
 
 # ══════════════════════════════════════════════════════════
-#  Binance API
+# Binance API
 # ══════════════════════════════════════════════════════════
 async def fetch_price(session: aiohttp.ClientSession) -> Optional[float]:
     url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={SYMBOL}"
@@ -88,8 +89,8 @@ async def fetch_price(session: aiohttp.ClientSession) -> Optional[float]:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
             if r.status == 200:
                 return float((await r.json())["price"])
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ خطأ في جلب السعر: {e}")
     return None
 
 
@@ -99,17 +100,17 @@ async def fetch_order_book(session: aiohttp.ClientSession) -> Optional[dict]:
         async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as r:
             if r.status == 200:
                 return await r.json()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ خطأ في جلب الدفتر: {e}")
     return None
 
 
 # ══════════════════════════════════════════════════════════
-#  منطق الإشارات
+# منطق الإشارات
 # ══════════════════════════════════════════════════════════
 def calc_imbalance(ob: dict) -> float:
-    bids  = sum(float(b[1]) for b in ob.get("bids", [])[:5])
-    asks  = sum(float(a[1]) for a in ob.get("asks", [])[:5])
+    bids = sum(float(b[1]) for b in ob.get("bids", [])[:5])
+    asks = sum(float(a[1]) for a in ob.get("asks", [])[:5])
     total = bids + asks
     return bids / total if total > 0 else 0.5
 
@@ -123,7 +124,7 @@ def calc_sltp(signal: str, price: float):
 def get_signal(imbalance: float, price: float):
     if imbalance > IMBALANCE_THRESHOLD:
         sl, tp = calc_sltp("BUY", price)
-        return "BUY",  sl, tp, f"طلب مرتفع {imbalance * 100:.0f}%"
+        return "BUY", sl, tp, f"طلب مرتفع {imbalance * 100:.0f}%"
     if imbalance < (1 - IMBALANCE_THRESHOLD):
         sl, tp = calc_sltp("SELL", price)
         return "SELL", sl, tp, f"عرض مرتفع {(1 - imbalance) * 100:.0f}%"
@@ -131,7 +132,7 @@ def get_signal(imbalance: float, price: float):
 
 
 # ══════════════════════════════════════════════════════════
-#  تليجرام
+# تليجرام
 # ══════════════════════════════════════════════════════════
 async def tg(session: aiohttp.ClientSession, msg: str):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -142,13 +143,13 @@ async def tg(session: aiohttp.ClientSession, msg: str):
             json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "Markdown"},
             timeout=aiohttp.ClientTimeout(total=8),
         ):
-            pass
+            print("✅ تم إرسال إشعار تليجرام")
     except Exception as e:
         print(f"⚠️ تليجرام خطأ: {e}")
 
 
 # ══════════════════════════════════════════════════════════
-#  مراقبة الصفقة (TP / SL)
+# مراقبة الصفقة (TP / SL)
 # ══════════════════════════════════════════════════════════
 async def watch_trade(session: aiohttp.ClientSession):
     global current_trade
@@ -156,10 +157,10 @@ async def watch_trade(session: aiohttp.ClientSession):
         if current_trade["active"]:
             price = await fetch_price(session)
             if price:
-                t      = current_trade
-                hit_tp = (t["type"] == "BUY"  and price >= t["tp"]) or \
+                t = current_trade
+                hit_tp = (t["type"] == "BUY" and price >= t["tp"]) or \
                          (t["type"] == "SELL" and price <= t["tp"])
-                hit_sl = (t["type"] == "BUY"  and price <= t["sl"]) or \
+                hit_sl = (t["type"] == "BUY" and price <= t["sl"]) or \
                          (t["type"] == "SELL" and price >= t["sl"])
 
                 if hit_tp and not t["tp_hit"]:
@@ -180,7 +181,7 @@ async def watch_trade(session: aiohttp.ClientSession):
 
 
 # ══════════════════════════════════════════════════════════
-#  Keep-alive — يمنع النوم على Render free tier
+# Keep-alive — يمنع النوم على Render free tier
 # ══════════════════════════════════════════════════════════
 async def keep_alive():
     target = RENDER_URL or f"http://localhost:{PORT}"
@@ -199,7 +200,43 @@ async def keep_alive():
 
 
 # ══════════════════════════════════════════════════════════
-#  الحلقة الرئيسية للبوت
+# Ticker الدائم — يجلب السعر ويحدثه فوراً (حتى لو البوت متوقف)
+# ══════════════════════════════════════════════════════════
+async def price_ticker():
+    """تحديث الأسعار بشكل مستمر حتى لو البوت متوقف"""
+    print("🔄 تشغيل تحديث الأسعار المستمر...")
+    async with aiohttp.ClientSession() as session:
+        while True:
+            try:
+                # جلب السعر ودفتر الطلبات دائماً
+                price = await fetch_price(session)
+                ob = await fetch_order_book(session)
+                
+                if price and ob:
+                    imbalance = calc_imbalance(ob)
+                    live.update({
+                        "price": price,
+                        "imbalance": round(imbalance, 4),
+                        "timestamp": datetime.now().strftime("%H:%M:%S"),
+                        "status": "running" if bot_running else "stopped",
+                        "trade": current_trade.copy(),
+                    })
+                    await broadcast({"type": "tick", **live})
+                    # طباعة تحديث السعر في الكونسول (مرة كل 10 ثواني)
+                    if int(time.time()) % 10 == 0:
+                        print(f"📊 السعر الحالي: {price:.2f} | OBI: {imbalance:.3f}")
+                else:
+                    print("⚠️ فشل في جلب البيانات من Binance، إعادة المحاولة...")
+                
+                await asyncio.sleep(0.35) # تحديث سريع كل 0.35 ثانية
+                
+            except Exception as e:
+                print(f"⚠️ خطأ في تحديث الأسعار: {e}")
+                await asyncio.sleep(2)
+
+
+# ══════════════════════════════════════════════════════════
+# الحلقة الرئيسية للبوت (للإشارات فقط)
 # ══════════════════════════════════════════════════════════
 async def run_bot():
     global bot_running, current_trade, live, signals_history
@@ -220,25 +257,15 @@ async def run_bot():
 
         while bot_running:
             try:
-                ob    = await fetch_order_book(session)
-                price = await fetch_price(session)
-
-                if not ob or not price:
+                # استخدام البيانات من live بدل جلبها مرة أخرى
+                price = live.get("price", 0)
+                imbalance = live.get("imbalance", 0.5)
+                
+                if price == 0:
                     await asyncio.sleep(0.35)
                     continue
 
-                imbalance = calc_imbalance(ob)
-                now       = datetime.now()
-
-                # ── تحديث البيانات الحية (3 مرات في الثانية) ──
-                live.update({
-                    "price":     price,
-                    "imbalance": round(imbalance, 4),
-                    "timestamp": now.strftime("%H:%M:%S"),
-                    "status":    "running",
-                    "trade":     current_trade.copy(),
-                })
-                await broadcast({"type": "tick", **live})
+                now = datetime.now()
 
                 # ── فحص الإشارة الفوري مع كول-داون ──
                 if not current_trade["active"]:
@@ -246,41 +273,41 @@ async def run_bot():
                         signal, sl, tp, reason = get_signal(imbalance, price)
                         if signal:
                             last_signal_time = time.time()
-                            arrow  = "🔥" if signal == "BUY" else "❄️"
+                            arrow = "🔥" if signal == "BUY" else "❄️"
                             action = "شراء" if signal == "BUY" else "بيع"
 
                             await tg(
                                 session,
                                 f"{arrow} *{SYMBOL}* {action} @ {price:.2f}\n\n"
-                                f"🥇 TP1: {tp:.2f}\n"
-                                f"🛑 SL:  {sl:.2f}\n\n"
+                                f"🥇 TP: {tp:.2f}\n"
+                                f"🛑 SL: {sl:.2f}\n\n"
                                 f"📊 OBI: {imbalance:.2f}\n"
                                 f"💡 {reason}",
                             )
 
                             entry = {
-                                "id":        len(signals_history) + 1,
-                                "type":      signal,
-                                "entry":     price,
-                                "tp":        tp,
-                                "sl":        sl,
+                                "id": len(signals_history) + 1,
+                                "type": signal,
+                                "entry": price,
+                                "tp": tp,
+                                "sl": sl,
                                 "imbalance": round(imbalance, 4),
-                                "reason":    reason,
-                                "time":      now.strftime("%H:%M:%S"),
-                                "date":      now.strftime("%Y-%m-%d"),
+                                "reason": reason,
+                                "time": now.strftime("%H:%M:%S"),
+                                "date": now.strftime("%Y-%m-%d"),
                             }
                             signals_history.insert(0, entry)
                             if len(signals_history) > 50:
                                 signals_history.pop()
 
                             current_trade.update({
-                                "active":      True,
-                                "type":        signal,
+                                "active": True,
+                                "type": signal,
                                 "entry_price": price,
-                                "tp":          tp,
-                                "sl":          sl,
-                                "tp_hit":      False,
-                                "sl_hit":      False,
+                                "tp": tp,
+                                "sl": sl,
+                                "tp_hit": False,
+                                "sl_hit": False,
                             })
                             await broadcast({"type": "signal", **entry})
                             print(f"📡 إشارة {signal} @ {price:.2f} | OBI: {imbalance:.2f}")
@@ -299,31 +326,21 @@ async def run_bot():
 
 
 # ══════════════════════════════════════════════════════════
-#  Ticker الدائم — يجلب السعر حتى وإن كان البوت متوقفاً
+# تشغيل تلقائي للبوت عند بدء الخادم
 # ══════════════════════════════════════════════════════════
-async def price_ticker():
-    async with aiohttp.ClientSession() as session:
-        while True:
-            if not bot_running:
-                try:
-                    price = await fetch_price(session)
-                    ob    = await fetch_order_book(session)
-                    if price and ob:
-                        imbalance = calc_imbalance(ob)
-                        live.update({
-                            "price":     price,
-                            "imbalance": round(imbalance, 4),
-                            "timestamp": datetime.now().strftime("%H:%M:%S"),
-                            "status":    "stopped",
-                        })
-                        await broadcast({"type": "tick", **live})
-                except Exception:
-                    pass
-            await asyncio.sleep(0.35)
+async def auto_start_bot():
+    """تشغيل البوت تلقائياً عند بدء التشغيل"""
+    global bot_running, bot_task
+    await asyncio.sleep(3) # انتظر 3 ثواني حتى يستقر السعر
+    if not bot_running:
+        bot_running = True
+        live["status"] = "running"
+        bot_task = asyncio.create_task(run_bot())
+        print("🤖 البوت بدأ تلقائياً!")
 
 
 # ══════════════════════════════════════════════════════════
-#  واجهة الويب — داشبورد عربي كامل
+# واجهة الويب — داشبورد عربي كامل
 # ══════════════════════════════════════════════════════════
 DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -443,7 +460,7 @@ tbody td{padding:11px 12px;vertical-align:middle}
       <div class="dot" id="dot"></div>
       <span id="stxt">متوقف</span>
     </div>
-    <button class="btn btn-on"  id="btnOn"  onclick="startBot()">تشغيل</button>
+    <button class="btn btn-on" id="btnOn" onclick="startBot()">تشغيل</button>
     <button class="btn btn-off" id="btnOff" onclick="stopBot()" disabled>إيقاف</button>
   </div>
 </header>
@@ -479,8 +496,8 @@ tbody td{padding:11px 12px;vertical-align:middle}
         <span class="badge b-idle" id="tbadge">لا توجد صفقة</span>
       </div>
       <div class="rows">
-        <div class="row"><span class="row-l">الحالة</span>     <span class="row-v"    id="tstat">في انتظار الإشارة</span></div>
-        <div class="row"><span class="row-l">سعر الدخول</span> <span class="row-v g"  id="tentry">--</span></div>
+        <div class="row"><span class="row-l">الحالة</span> <span class="row-v" id="tstat">في انتظار الإشارة</span></div>
+        <div class="row"><span class="row-l">سعر الدخول</span> <span class="row-v g" id="tentry">--</span></div>
         <div class="row"><span class="row-l">الهدف (TP)</span> <span class="row-v tp" id="ttp">--</span></div>
         <div class="row"><span class="row-l">الستوب (SL)</span><span class="row-v sl" id="tsl">--</span></div>
       </div>
@@ -488,12 +505,12 @@ tbody td{padding:11px 12px;vertical-align:middle}
     <div class="card">
       <div class="sec-title">إعدادات البوت</div>
       <div class="rows">
-        <div class="row"><span class="row-l">الزوج</span>             <span class="row-v g">XAUUSDT</span></div>
+        <div class="row"><span class="row-l">الزوج</span> <span class="row-v g">XAUUSDT</span></div>
         <div class="row"><span class="row-l">عتبة الدخول (OBI)</span> <span class="row-v">80%</span></div>
-        <div class="row"><span class="row-l">الهدف</span>             <span class="row-v tp">100 نقطة</span></div>
-        <div class="row"><span class="row-l">الستوب</span>            <span class="row-v sl">100 نقطة</span></div>
-        <div class="row"><span class="row-l">كول-داون الإشارة</span>  <span class="row-v">60 ثانية</span></div>
-        <div class="row"><span class="row-l">سرعة المسح</span>        <span class="row-v">~3x / ثانية</span></div>
+        <div class="row"><span class="row-l">الهدف</span> <span class="row-v tp">100 نقطة</span></div>
+        <div class="row"><span class="row-l">الستوب</span> <span class="row-v sl">100 نقطة</span></div>
+        <div class="row"><span class="row-l">كول-داون الإشارة</span> <span class="row-v">60 ثانية</span></div>
+        <div class="row"><span class="row-l">سرعة المسح</span> <span class="row-v">~3x / ثانية</span></div>
       </div>
     </div>
   </div>
@@ -502,13 +519,14 @@ tbody td{padding:11px 12px;vertical-align:middle}
     <div class="sec-title">سجل الإشارات</div>
     <div class="tw">
       <table>
-        <thead><tr>
-          <th>#</th><th>التاريخ</th><th>الوقت</th><th>النوع</th>
-          <th>الدخول</th><th>الهدف</th><th>الستوب</th><th>OBI</th><th>السبب</th>
-        </tr>
+        <thead>
+          <tr>
+            <th>#</th><th>التاريخ</th><th>الوقت</th><th>النوع</th>
+            <th>الدخول</th><th>الهدف</th><th>الستوب</th><th>OBI</th><th>السبب</th>
+          </tr>
         </thead>
         <tbody id="tBody">
-          <tr class="empty"><td colspan="9">لا توجد إشارات — شغّل البوت للبدء</td></tr>
+          <tr class="empty"><td colspan="9">لا توجد إشارات — البوت يعمل تلقائياً</td></tr>
         </tbody>
       </table>
     </div>
@@ -523,7 +541,7 @@ let ws, timer, running = false, sigs = [];
 function conn() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
-  ws.onopen  = () => clearTimeout(timer);
+  ws.onopen = () => clearTimeout(timer);
   ws.onclose = () => { timer = setTimeout(conn, 3000); };
   ws.onmessage = e => {
     const d = JSON.parse(e.data);
@@ -546,33 +564,33 @@ function conn() {
 }
 
 function applyTick(d) {
-  if (d.price)     el('price').textContent = d.price.toFixed(2);
-  if (d.timestamp) el('ts').textContent    = d.timestamp;
+  if (d.price) el('price').textContent = d.price.toFixed(2);
+  if (d.timestamp) el('ts').textContent = d.timestamp;
   if (d.imbalance !== undefined) {
     const p = d.imbalance * 100;
-    el('obiV').textContent  = d.imbalance.toFixed(4);
-    el('obiB').style.width  = p + '%';
+    el('obiV').textContent = d.imbalance.toFixed(4);
+    el('obiB').style.width = p + '%';
     el('obiB').style.background = p > 80 ? '#10b981' : p < 20 ? '#ef4444' : '#3b82f6';
   }
-  if (d.trade)   applyTrade(d.trade);
-  if (d.status)  { running = d.status === 'running'; setPill(running); setCtrl(running); }
+  if (d.trade) applyTrade(d.trade);
+  if (d.status) { running = d.status === 'running'; setPill(running); setCtrl(running); }
 }
 
 function applyTrade(t) {
   if (!t) return;
-  const card  = el('tradeCard');
+  const card = el('tradeCard');
   const badge = el('tbadge');
   if (t.active) {
     const buy = t.type === 'BUY';
-    card.className  = `card ${buy ? 'buy' : 'sell'}`;
+    card.className = `card ${buy ? 'buy' : 'sell'}`;
     badge.className = `badge ${buy ? 'b-buy' : 'b-sell'}`;
     badge.textContent = buy ? 'شراء نشط' : 'بيع نشط';
-    el('tstat').textContent  = 'صفقة مفتوحة';
+    el('tstat').textContent = 'صفقة مفتوحة';
     el('tentry').textContent = t.entry_price?.toFixed(2) || '--';
-    el('ttp').textContent    = t.tp?.toFixed(2)          || '--';
-    el('tsl').textContent    = t.sl?.toFixed(2)          || '--';
+    el('ttp').textContent = t.tp?.toFixed(2) || '--';
+    el('tsl').textContent = t.sl?.toFixed(2) || '--';
   } else {
-    card.className  = 'card';
+    card.className = 'card';
     badge.className = 'badge b-idle';
     badge.textContent = 'لا توجد صفقة';
     el('tstat').textContent = 'في انتظار الإشارة';
@@ -584,7 +602,7 @@ function render() {
   el('sigN').textContent = sigs.length;
   const b = el('tBody');
   if (!sigs.length) {
-    b.innerHTML = '<tr class="empty"><td colspan="9">لا توجد إشارات — شغّل البوت للبدء</td></tr>';
+    b.innerHTML = '<tr class="empty"><td colspan="9">لا توجد إشارات — البوت يعمل تلقائياً</td></tr>';
     return;
   }
   b.innerHTML = sigs.map(s => `<tr>
@@ -601,11 +619,11 @@ function render() {
 }
 
 function setPill(on) {
-  el('dot').className        = 'dot' + (on ? ' on' : '');
-  el('stxt').textContent     = on ? 'يعمل' : 'متوقف';
+  el('dot').className = 'dot' + (on ? ' on' : '');
+  el('stxt').textContent = on ? 'يعمل' : 'متوقف';
 }
 function setCtrl(on) {
-  el('btnOn').disabled  = on;
+  el('btnOn').disabled = on;
   el('btnOff').disabled = !on;
 }
 function el(id) { return document.getElementById(id); }
@@ -614,7 +632,7 @@ let toastT;
 function toast(msg, cls = '') {
   const t = el('toast');
   t.textContent = msg;
-  t.className   = 'show ' + cls;
+  t.className = 'show ' + cls;
   clearTimeout(toastT);
   toastT = setTimeout(() => t.className = '', 4000);
 }
@@ -622,8 +640,8 @@ function toast(msg, cls = '') {
 async function startBot() {
   setCtrl(true);
   const ok = await fetch('/bot/start', { method: 'POST' }).then(r => r.ok).catch(() => false);
-  if (ok) { setPill(true);  toast('تم تشغيل البوت ✅', 'g'); }
-  else    { setCtrl(false); toast('فشل التشغيل ❌', 'r'); }
+  if (ok) { setPill(true); toast('تم تشغيل البوت ✅', 'g'); }
+  else { setCtrl(false); toast('فشل التشغيل ❌', 'r'); }
 }
 async function stopBot() {
   setCtrl(false);
@@ -639,16 +657,21 @@ conn();
 
 
 # ══════════════════════════════════════════════════════════
-#  FastAPI — المسارات
+# FastAPI — المسارات
 # ══════════════════════════════════════════════════════════
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asyncio.create_task(price_ticker())
-    asyncio.create_task(keep_alive())
+    # بدء المهام الأساسية فوراً
+    print("🚀 بدء تشغيل الخادم...")
+    asyncio.create_task(price_ticker()) # تحديث الأسعار فوراً
+    asyncio.create_task(keep_alive()) # منع النوم
+    asyncio.create_task(auto_start_bot()) # تشغيل البوت تلقائياً
+    print("✅ جميع المهام قيد التشغيل")
     yield
+    print("🛑 إيقاف الخادم")
 
 
-app = FastAPI(title="بوت السكالبنج", lifespan=lifespan)
+app = FastAPI(title="بوت السكالبنج - تشغيل تلقائي", lifespan=lifespan)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -659,11 +682,14 @@ async def dashboard():
 @app.get("/status")
 async def status():
     return {
-        "running":   bot_running,
-        "symbol":    SYMBOL,
+        "running": bot_running,
+        "symbol": SYMBOL,
         "threshold": IMBALANCE_THRESHOLD,
         "tp_points": TP_POINTS,
         "sl_points": SL_POINTS,
+        "price": live["price"],
+        "imbalance": live["imbalance"],
+        "timestamp": live["timestamp"],
         **live,
     }
 
@@ -681,18 +707,21 @@ async def start():
         live["status"] = "running"
         bot_task = asyncio.create_task(run_bot())
         await broadcast({"type": "status_change", "status": "running"})
+        print("✅ تم تشغيل البوت يدوياً")
     return {"ok": True, "running": True}
 
 
 @app.post("/bot/stop")
 async def stop():
     global bot_running, bot_task
-    bot_running = False
-    if bot_task:
-        bot_task.cancel()
-        bot_task = None
-    live["status"] = "stopped"
-    await broadcast({"type": "status_change", "status": "stopped"})
+    if bot_running:
+        bot_running = False
+        if bot_task:
+            bot_task.cancel()
+            bot_task = None
+        live["status"] = "stopped"
+        await broadcast({"type": "status_change", "status": "stopped"})
+        print("🛑 تم إيقاف البوت يدوياً")
     return {"ok": True, "running": False}
 
 
@@ -701,11 +730,15 @@ async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     clients.append(ws)
     try:
+        # إرسال البيانات الحالية فور الاتصال
         await ws.send_json({
-            "type":      "tick",
-            "running":   bot_running,
-            "signals":   signals_history,
-            **live,
+            "type": "tick",
+            "running": bot_running,
+            "price": live["price"],
+            "imbalance": live["imbalance"],
+            "timestamp": live["timestamp"],
+            "status": live["status"],
+            "trade": current_trade.copy(),
         })
         while True:
             await ws.receive_text()
@@ -717,15 +750,18 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 # ══════════════════════════════════════════════════════════
-#  تشغيل الخادم
+# تشغيل الخادم
 # ══════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    print("=" * 54)
-    print("🤖  بوت السكالبنج — XAUUSDT")
-    print(f"🌐  الداشبورد: http://localhost:{PORT}")
-    print(f"🎯  الهدف: {TP_POINTS} نقطة  |  🛑 الستوب: {SL_POINTS} نقطة")
-    print(f"📊  عتبة OBI: {IMBALANCE_THRESHOLD * 100:.0f}%")
-    print(f"⚡  مسح كل 0.35 ثانية (~3x/ثانية)")
-    print(f"🔔  تليجرام: {'✅ مفعّل' if TELEGRAM_TOKEN else '❌ غير مضبوط'}")
-    print("=" * 54)
+    print("=" * 60)
+    print("🤖 بوت السكالبنج — XAUUSDT (تشغيل تلقائي)")
+    print(f"🌐 الداشبورد: http://localhost:{PORT}")
+    print(f"🎯 الهدف: {TP_POINTS} نقطة | 🛑 الستوب: {SL_POINTS} نقطة")
+    print(f"📊 عتبة OBI: {IMBALANCE_THRESHOLD * 100:.0f}%")
+    print(f"⚡ تحديث الأسعار كل 0.35 ثانية")
+    print(f"🔔 تليجرام: {'✅ مفعّل' if TELEGRAM_TOKEN else '❌ غير مضبوط'}")
+    print(f"🔄 البوت يبدأ تلقائياً عند تشغيل الخادم")
+    print(f"🛑 لا يتوقف إلا إذا ضغطت إيقاف أو أوقفت الخادم")
+    print("=" * 60)
     uvicorn.run(app, host="0.0.0.0", port=PORT)
+عرض النص المقتبس

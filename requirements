@@ -4,3 +4,4 @@ numpy
 ta
 telebot
 loguru
+aiohttp

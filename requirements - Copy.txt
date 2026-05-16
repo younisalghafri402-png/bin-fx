@@ -1,1 +1,6 @@
-aiohttp
+ccxt
+pandas
+numpy
+ta
+telebot
+loguru

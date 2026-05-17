@@ -2,7 +2,7 @@
 ╔══════════════════════════════════════════════════════════╗
 ║         بوت السكالبنج — XAUUSDT / Binance Futures       ║
 ║  ملف واحد: بوت + واجهة ويب + تليجرام + منع النوم 24/7   ║
-║  مع HTTP polling بديل WebSocket للعمل على Render        ║
+║  إشارات سريعة + رسائل واضحة + تحديث فوري للأسعار       ║
 ║  تشغيل: python bot.py                                    ║
 ╚══════════════════════════════════════════════════════════╝
 """
@@ -61,7 +61,7 @@ live: Dict[str, Any] = {
 clients: List[WebSocket] = []
 
 # ══════════════════════════════════════════════════════════
-#  WebSocket - بث للجميع (يعمل في حالة وجود اتصال)
+#  WebSocket - بث للجميع
 # ══════════════════════════════════════════════════════════
 async def broadcast(data: dict):
     dead = []
@@ -306,7 +306,7 @@ async def auto_start_bot():
         print("🤖 البوت بدأ تلقائياً!")
 
 # ══════════════════════════════════════════════════════════
-#  واجهة الويب - مع HTTP polling بديل WebSocket
+#  واجهة الويب - تحديث فوري
 # ══════════════════════════════════════════════════════════
 HTML_CONTENT = """<!DOCTYPE html>
 <html lang="ar" dir="rtl">
@@ -497,12 +497,6 @@ HTML_CONTENT = """<!DOCTYPE html>
         color: #ef4444;
         font-weight: 600;
     }
-    .last-update {
-        font-size: 0.7rem;
-        color: #64748b;
-        text-align: center;
-        margin-top: 15px;
-    }
     @media (max-width: 768px) {
         .price { font-size: 2rem; }
         .obi { font-size: 1.5rem; }
@@ -533,7 +527,7 @@ HTML_CONTENT = """<!DOCTYPE html>
             <div class="card-title">⚡ حالة البوت</div>
             <div><span class="status status-stopped" id="status">متوقف</span></div>
             <div style="margin-top: 15px;">
-                <button class="btn btn-start" id="startBtn">▶ تشغيل</button>
+                <button class="btn btn-start" id="startBtn">▶️ تشغيل</button>
                 <button class="btn btn-stop" id="stopBtn">⏹ إيقاف</button>
             </div>
         </div>
@@ -597,87 +591,93 @@ HTML_CONTENT = """<!DOCTYPE html>
     </div>
     
     <div class="timestamp" id="timestamp">آخر تحديث: --:--:--</div>
-    <div class="last-update" id="lastPoll">جاري التحديث...</div>
 </div>
 
 <script>
+let ws;
 let signals = [];
-let pollInterval;
 
-// دالة جلب البيانات عبر HTTP polling
-async function fetchData() {
-    try {
-        const response = await fetch('/api/live');
-        const data = await response.json();
+function connectWebSocket() {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${protocol}//${location.host}/ws`);
+    
+    ws.onopen = () => {
+        console.log('✅ WebSocket متصل');
+    };
+    
+    ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
         
-        // تحديث السعر
-        if (data.price) {
-            document.getElementById('price').innerText = data.price.toFixed(2);
+        if (data.type === 'tick') {
+            updateUI(data);
+        } else if (data.type === 'signal') {
+            signals.unshift(data);
+            updateSignalsTable();
+            showToast(`🔔 إشارة ${data.type === 'BUY' ? 'شراء' : 'بيع'} @ ${data.entry}`, data.type);
+        } else if (data.type === 'trade_closed') {
+            showToast(data.result === 'TP' ? '✅ تم تحقيق الهدف!' : '❌ تم ضرب الستوب!', data.result);
+        } else if (data.type === 'status_change') {
+            updateStatus(data.status);
         }
-        
-        // تحديث OBI
-        if (data.imbalance !== undefined) {
-            const obi = data.imbalance;
-            const percent = obi * 100;
-            document.getElementById('obi').innerText = obi.toFixed(4);
-            const bar = document.getElementById('obibar');
-            bar.style.width = percent + '%';
-            if (percent > 70) bar.style.background = '#10b981';
-            else if (percent < 30) bar.style.background = '#ef4444';
-            else bar.style.background = '#3b82f6';
-        }
-        
-        // تحديث الوقت
-        if (data.timestamp) {
-            document.getElementById('timestamp').innerText = 'آخر تحديث: ' + data.timestamp;
-        }
-        document.getElementById('lastPoll').innerHTML = '🔄 تحديث تلقائي كل ثانية - ' + new Date().toLocaleTimeString();
-        
-        // تحديث الصفقة الحالية
-        if (data.trade) {
-            if (data.trade.active) {
-                document.getElementById('tradeStatus').innerHTML = data.trade.type === 'BUY' ? '🔴 صفقة شراء نشطة' : '🔵 صفقة بيع نشطة';
-                document.getElementById('entryPrice').innerHTML = data.trade.entry_price?.toFixed(2) || '---';
-                document.getElementById('tp').innerHTML = data.trade.tp?.toFixed(2) || '---';
-                document.getElementById('sl').innerHTML = data.trade.sl?.toFixed(2) || '---';
-            } else {
-                document.getElementById('tradeStatus').innerHTML = 'في انتظار إشارة';
-                document.getElementById('entryPrice').innerHTML = '---';
-                document.getElementById('tp').innerHTML = '---';
-                document.getElementById('sl').innerHTML = '---';
-            }
-        }
-        
-        // تحديث حالة البوت
-        if (data.status === 'running') {
-            document.getElementById('status').innerText = 'يعمل';
-            document.getElementById('status').className = 'status status-running';
-            document.getElementById('startBtn').disabled = true;
-            document.getElementById('stopBtn').disabled = false;
-        } else {
-            document.getElementById('status').innerText = 'متوقف';
-            document.getElementById('status').className = 'status status-stopped';
-            document.getElementById('startBtn').disabled = false;
-            document.getElementById('stopBtn').disabled = true;
-        }
-        
-    } catch (error) {
-        console.error('خطأ في جلب البيانات:', error);
-        document.getElementById('lastPoll').innerHTML = '⚠️ خطأ في الاتصال - إعادة المحاولة...';
+    };
+    
+    ws.onclose = () => {
+        console.log('❌ WebSocket disconnected, reconnecting...');
+        setTimeout(connectWebSocket, 3000);
+    };
+}
+
+function updateUI(data) {
+    if (data.price) {
+        document.getElementById('price').innerText = data.price.toFixed(2);
+    }
+    if (data.imbalance !== undefined) {
+        const obi = data.imbalance;
+        const percent = obi * 100;
+        document.getElementById('obi').innerText = obi.toFixed(4);
+        const bar = document.getElementById('obibar');
+        bar.style.width = percent + '%';
+        if (percent > 70) bar.style.background = '#10b981';
+        else if (percent < 30) bar.style.background = '#ef4444';
+        else bar.style.background = '#3b82f6';
+    }
+    if (data.timestamp) {
+        document.getElementById('timestamp').innerText = 'آخر تحديث: ' + data.timestamp;
+    }
+    if (data.trade) {
+        updateTradeUI(data.trade);
+    }
+    if (data.status) {
+        updateStatus(data.status);
     }
 }
 
-// جلب سجل الإشارات
-async function fetchSignals() {
-    try {
-        const response = await fetch('/signals');
-        const data = await response.json();
-        if (Array.isArray(data)) {
-            signals = data;
-            updateSignalsTable();
-        }
-    } catch (error) {
-        console.error('خطأ في جلب الإشارات:', error);
+function updateTradeUI(trade) {
+    if (trade.active) {
+        document.getElementById('tradeStatus').innerHTML = trade.type === 'BUY' ? '🔴 صفقة شراء نشطة' : '🔵 صفقة بيع نشطة';
+        document.getElementById('entryPrice').innerHTML = trade.entry_price?.toFixed(2) || '---';
+        document.getElementById('tp').innerHTML = trade.tp?.toFixed(2) || '---';
+        document.getElementById('sl').innerHTML = trade.sl?.toFixed(2) || '---';
+    } else {
+        document.getElementById('tradeStatus').innerHTML = 'في انتظار إشارة';
+        document.getElementById('entryPrice').innerHTML = '---';
+        document.getElementById('tp').innerHTML = '---';
+        document.getElementById('sl').innerHTML = '---';
+    }
+}
+
+function updateStatus(status) {
+    const statusEl = document.getElementById('status');
+    if (status === 'running') {
+        statusEl.innerText = 'يعمل';
+        statusEl.className = 'status status-running';
+        document.getElementById('startBtn').disabled = true;
+        document.getElementById('stopBtn').disabled = false;
+    } else {
+        statusEl.innerText = 'متوقف';
+        statusEl.className = 'status status-stopped';
+        document.getElementById('startBtn').disabled = false;
+        document.getElementById('stopBtn').disabled = true;
     }
 }
 
@@ -687,7 +687,7 @@ function updateSignalsTable() {
         tbody.innerHTML = '<tr><td colspan="7" style="text-align: center;">لا توجد إشارات بعد</td></tr>';
         return;
     }
-    tbody.innerHTML = signals.slice(0, 30).map(s => `
+    tbody.innerHTML = signals.slice(0, 20).map(s => `
         <tr>
             <td>${s.id}</td>
             <td>${s.time}</td>
@@ -700,24 +700,59 @@ function updateSignalsTable() {
     `).join('');
 }
 
+function showToast(message, type) {
+    // إنشاء توست بسيط
+    let toast = document.getElementById('toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = 'toast';
+        toast.style.cssText = `
+            position: fixed; bottom: 20px; right: 20px; padding: 12px 24px;
+            border-radius: 10px; color: white; font-weight: bold; z-index: 1000;
+            animation: slideIn 0.3s ease;
+        `;
+        document.body.appendChild(toast);
+        
+        // إضافة الـ keyframes
+        if (!document.querySelector('#toast-style')) {
+            const style = document.createElement('style');
+            style.id = 'toast-style';
+            style.textContent = `
+                @keyframes slideIn {
+                    from { transform: translateX(100%); opacity: 0; }
+                    to { transform: translateX(0); opacity: 1; }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+    }
+    
+    if (type === 'BUY' || type === 'TP') {
+        toast.style.background = '#10b981';
+    } else if (type === 'SELL' || type === 'SL') {
+        toast.style.background = '#ef4444';
+    } else {
+        toast.style.background = '#f59e0b';
+    }
+    
+    toast.innerText = message;
+    toast.style.display = 'block';
+    
+    setTimeout(() => {
+        toast.style.display = 'none';
+    }, 3000);
+}
+
 // التحكم في البوت
 document.getElementById('startBtn').onclick = async () => {
     await fetch('/bot/start', { method: 'POST' });
-    setTimeout(fetchData, 500);
 };
-
 document.getElementById('stopBtn').onclick = async () => {
     await fetch('/bot/stop', { method: 'POST' });
-    setTimeout(fetchData, 500);
 };
 
-// بدء التحديث الدوري
-fetchData();
-fetchSignals();
-pollInterval = setInterval(() => {
-    fetchData();
-    fetchSignals();
-}, 1000);
+// بدء الاتصال
+connectWebSocket();
 </script>
 </body>
 </html>"""
@@ -752,13 +787,17 @@ async def status():
 
 @app.get("/api/live")
 async def get_live():
-    """API بديل لسحب البيانات - يعمل بدون WebSocket"""
+    """API بديل لسحب البيانات"""
     return {
         "price": live["price"],
         "imbalance": live["imbalance"],
         "timestamp": live["timestamp"],
         "status": live["status"],
-        "trade": current_trade.copy()
+        "trade_active": current_trade["active"],
+        "trade_type": current_trade["type"],
+        "entry_price": current_trade["entry_price"],
+        "tp": current_trade["tp"],
+        "sl": current_trade["sl"],
     }
 
 @app.get("/signals")
@@ -812,8 +851,8 @@ if __name__ == "__main__":
     print(f"🎯 الهدف: {TP_POINTS} نقطة | 🛑 الستوب: {SL_POINTS} نقطة")
     print(f"📊 عتبة OBI: {IMBALANCE_THRESHOLD * 100:.0f}%")
     print(f"⚡ تحديث الأسعار كل 0.35 ثانية")
-    print(f"🌐 واجهة الويب: HTTP polling كل 1 ثانية (بديل WebSocket)")
     print(f"🔔 تليجرام: {'✅ مفعّل' if TELEGRAM_TOKEN else '❌ غير مضبوط'}")
     print(f"🔄 البوت يبدأ تلقائياً")
+    print(f"✅ ضرب الهدف/الستوب يظهر في التليجرام")
     print("=" * 60)
     uvicorn.run(app, host="0.0.0.0", port=PORT)

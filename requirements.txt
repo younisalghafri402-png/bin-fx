@@ -6,3 +6,5 @@ wsproto
 fastapi
 aiohttp
 uvicorn
+aiohttp
+aiodns

@@ -1,5 +1,6 @@
 import asyncio
 import aiohttp
+import aiohttp.resolver
 from datetime import datetime
 
 # =============================================
@@ -7,15 +8,13 @@ from datetime import datetime
 # =============================================
 SYMBOL = "XAUUSDT"
 DEPTH_LIMIT = 10
-IMBALANCE_THRESHOLD = 0.80  # 80% عتبة الدخول القوي
+IMBALANCE_THRESHOLD = 0.80
 
 # =============================================
-# 2. إعدادات الهدف والستوب (أوسع الآن)
+# 2. إعدادات الهدف والستوب
 # =============================================
-# للذهب: 1 نقطة = 0.01 دولار (تقريباً)
-# الهدف: 5-10 نقاط، الستوب: 8-12 نقطة
-TP_POINTS = 100      # الهدف 8 نقاط
-SL_POINTS = 100     # الستوب 10 نقاط
+TP_POINTS = 100
+SL_POINTS = 100
 
 # =============================================
 # 3. إعدادات تليجرام
@@ -24,11 +23,11 @@ TELEGRAM_BOT_TOKEN = "8292443875:AAHVG6THkf9zL2r-1B2DVUcUl4yfWXS52zg"
 TELEGRAM_CHAT_ID = "-1003952441740"
 
 # =============================================
-# 4. حالة البوت (تتبع الصفقة الحالية)
+# 4. حالة البوت
 # =============================================
 current_trade = {
     "active": False,
-    "type": None,       # "BUY" أو "SELL"
+    "type": None,
     "entry_price": 0,
     "tp": 0,
     "sl": 0,
@@ -37,29 +36,36 @@ current_trade = {
 }
 
 # =============================================
-# 5. جلب البيانات من Binance (بدون API Key)
+# 5. جلب البيانات من Binance (SPOT)
 # =============================================
 async def fetch_order_book(session):
-    url = f"https://fapi.binance.com/fapi/v1/depth?symbol={SYMBOL}&limit={DEPTH_LIMIT}"
+    url = f"https://api.binance.com/api/v3/depth?symbol={SYMBOL}&limit={DEPTH_LIMIT}"
     try:
-        async with session.get(url, timeout=5) as response:
+        async with session.get(url, timeout=5) as response:  # خفضت timeout
             if response.status == 200:
                 return await response.json()
+            else:
+                text = await response.text()
+                print(f"خطأ في العمق: HTTP {response.status} - {text[:200]}")
     except Exception as e:
         print(f"خطأ في جلب العمق: {e}")
     return None
 
 async def get_current_price(session):
-    url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={SYMBOL}"
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={SYMBOL}"
     try:
-        async with session.get(url, timeout=5) as response:
-            data = await response.json()
-            return float(data['price'])
-    except:
-        return None
+        async with session.get(url, timeout=5) as response:  # خفضت timeout
+            if response.status == 200:
+                data = await response.json()
+                return float(data['price'])
+            else:
+                text = await response.text()
+                print(f"خطأ في السعر: HTTP {response.status} - {text[:200]}")
+    except Exception as e:
+        print(f"خطأ في جلب السعر: {e}")
+    return None
 
 def calculate_imbalance(order_book):
-    """حساب عدم التوازن من أول 5 مستويات"""
     bids = order_book.get('bids', [])
     asks = order_book.get('asks', [])
     total_bid = sum(float(b[1]) for b in bids[:5])
@@ -68,164 +74,183 @@ def calculate_imbalance(order_book):
     return total_bid / total if total > 0 else 0.5
 
 def calculate_sltp(signal, current_price):
-    """حساب الهدف والستوب بنقاط ثابتة (أوسع الآن)"""
     if signal == "BUY":
-        tp = current_price + TP_POINTS * 0.01   # 8 نقاط هدف
-        sl = current_price - SL_POINTS * 0.01   # 10 نقاط ستوب
-    else:  # SELL
-        tp = current_price - TP_POINTS * 0.01   # 8 نقاط هدف
-        sl = current_price + SL_POINTS * 0.01   # 10 نقاط ستوب
-    
+        tp = current_price + TP_POINTS * 0.01
+        sl = current_price - SL_POINTS * 0.01
+    else:
+        tp = current_price - TP_POINTS * 0.01
+        sl = current_price + SL_POINTS * 0.01
     return round(sl, 2), round(tp, 2)
 
 def generate_signal(imbalance, current_price):
-    """توليد الإشارة فقط عند ظروف قوية"""
     if imbalance > IMBALANCE_THRESHOLD:
         signal = "BUY"
         sl, tp = calculate_sltp("BUY", current_price)
-        reason = f"طلب مرتفع جداً {imbalance*100:.0f}%"
+        reason = f"DEMAND: {imbalance*100:.0f}% [Extreme]"
         return signal, sl, tp, reason
-        
     elif imbalance < (1 - IMBALANCE_THRESHOLD):
         signal = "SELL"
         sl, tp = calculate_sltp("SELL", current_price)
-        reason = f"عرض مرتفع جداً {(1-imbalance)*100:.0f}%"
+        reason = f"SUPPLY: {(1-imbalance)*100:.0f}% [Extreme]"
         return signal, sl, tp, reason
-    
     return None, None, None, None
 
-# =============================================
-# 6. إرسال إلى تليجرام (بالتنسيق الصحيح)
-# =============================================
 async def send_telegram_message(session, message):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
-        "parse_mode": "Markdown"
+        "parse_mode": "HTML"
     }
     try:
         async with session.post(url, json=payload, timeout=5) as resp:
             if resp.status != 200:
                 print(f"فشل الإرسال: {await resp.text()}")
     except Exception as e:
-        print(f"خطأ: {e}")
+        print(f"خطأ في إرسال تلغرام: {e}")
 
 def format_signal_message(symbol, signal, entry, sl, tp, reason, imbalance):
-    """تنسيق التوصية بالشكل الذي تريده"""
     if signal == "BUY":
-        arrow = "🔥"
-        action = "شراء"
+        arrow = "⚡"
+        action = "BUY"
+        demand_supply = "🔥"
     else:
-        arrow = "❄️"
-        action = "بيع"
-    
-    # ملاحظة: TP و SL معكوسين في البيع لأن الهدف أقل من سعر الدخول
-    if signal == "SELL":
-        message = f"""{arrow} *{symbol}* {action} {entry:.2f}
+        arrow = "⚡"
+        action = "SELL"
+        demand_supply = "❄️"
+    message = f"""{arrow} {symbol} (GOLD) — {action} {arrow}
+──────────────────
+📍 ENTRY  ➔  {entry:.2f}
 
-🥇 TP1: {tp:.2f}
-🛑 SL: {sl:.2f}
+🎯 TP1    ➔  {tp:.2f}
 
-📊 عدم توازن: {imbalance:.2f}
-💡 {reason}"""
-    else:
-        message = f"""{arrow} *{symbol}* {action} {entry:.2f}
-
-🥇 TP1: {tp:.2f}
-🛑 SL: {sl:.2f}
-
-📊 عدم توازن: {imbalance:.2f}
-💡 {reason}"""
-    
+🛑 SL     ➔  {sl:.2f}
+──────────────────
+📊 IMBALANCE: {imbalance:.2f}
+{demand_supply} {reason}"""
     return message
 
-# =============================================
-# 7. مراقبة الصفقة الحالية
-# =============================================
-async def monitor_current_trade(session):
-    global current_trade
-    
-    while True:
-        if current_trade["active"]:
-            current_price = await get_current_price(session)
-            
-            if current_price:
-                trade_type = current_trade["type"]
-                tp = current_trade["tp"]
-                sl = current_trade["sl"]
-                
-                # التحقق من ضرب الهدف
-                if trade_type == "BUY" and current_price >= tp:
-                    if not current_trade["tp_hit"]:
-                        current_trade["tp_hit"] = True
-                        current_trade["active"] = False
-                        await send_telegram_message(session, f"✅ *TP1 {SYMBOL} DONE* 🥇")
-                        print(f"🎯 ضرب الهدف عند {current_price}")
-                        
-                elif trade_type == "SELL" and current_price <= tp:
-                    if not current_trade["tp_hit"]:
-                        current_trade["tp_hit"] = True
-                        current_trade["active"] = False
-                        await send_telegram_message(session, f"✅ *TP1 {SYMBOL} DONE* 🥇")
-                        print(f"🎯 ضرب الهدف عند {current_price}")
-                
-                # التحقق من ضرب الستوب
-                if trade_type == "BUY" and current_price <= sl:
-                    if not current_trade["sl_hit"]:
-                        current_trade["sl_hit"] = True
-                        current_trade["active"] = False
-                        await send_telegram_message(session, f"🛑 *SL Hit {SYMBOL}*")
-                        print(f"🛑 ضرب الستوب عند {current_price}")
-                        
-                elif trade_type == "SELL" and current_price >= sl:
-                    if not current_trade["sl_hit"]:
-                        current_trade["sl_hit"] = True
-                        current_trade["active"] = False
-                        await send_telegram_message(session, f"🛑 *SL Hit {SYMBOL}*")
-                        print(f"🛑 ضرب الستوب عند {current_price}")
-        
-        await asyncio.sleep(1)
+async def fetch_order_book_futures(session):
+    url = f"https://fapi.binance.com/fapi/v1/depth?symbol={SYMBOL}&limit={DEPTH_LIMIT}"
+    try:
+        async with session.get(url, timeout=5) as response:
+            if response.status == 200:
+                return await response.json()
+            else:
+                text = await response.text()
+                print(f"خطأ في العمق (futures): HTTP {response.status} - {text[:200]}")
+    except Exception as e:
+        print(f"خطأ في جلب العمق (futures): {e}")
+    return None
 
-# =============================================
-# 8. الحلقة الرئيسية
-# =============================================
+async def get_current_price_futures(session):
+    url = f"https://fapi.binance.com/fapi/v1/ticker/price?symbol={SYMBOL}"
+    try:
+        async with session.get(url, timeout=5) as response:
+            if response.status == 200:
+                data = await response.json()
+                return float(data['price'])
+            else:
+                text = await response.text()
+                print(f"خطأ في السعر (futures): HTTP {response.status} - {text[:200]}")
+    except Exception as e:
+        print(f"خطأ في جلب السعر (futures): {e}")
+    return None
+
 async def main():
     global current_trade
-    
     print(f"🚀 بوت السكالبنج - {SYMBOL}")
     print(f"🎯 الهدف: {TP_POINTS} نقطة | 🛑 الستوب: {SL_POINTS} نقطة")
-    print("📌 ينتظر إشارات قوية (عدم توازن 65%+)\n")
+    print("📌 ينتظر إشارات قوية (عدم توازن 80%+)")
+    print("⚡ سرعة التحديث: 0.5 ثانية (120 تحديث/دقيقة)\n")
+    print("🔄 تم إعداد DNS مخصص (8.8.8.8) لتجنب مشاكل الاتصال...")
     
-    async with aiohttp.ClientSession() as session:
-        await send_telegram_message(session, f"🤖 *بوت السكالبنج قيد التشغيل*\n📊 {SYMBOL}\n🎯 الهدف: {TP_POINTS} نقطة | 🛑 الستوب: {SL_POINTS} نقطة")
+    resolver = aiohttp.resolver.AsyncResolver(nameservers=['8.8.8.8', '8.8.4.4'])
+    connector = aiohttp.TCPConnector(resolver=resolver)
+    
+    current_get_price = get_current_price
+    current_fetch_order_book = fetch_order_book
+    
+    async with aiohttp.ClientSession(connector=connector) as session:
+        test_price = await current_get_price(session)
+        if test_price is None:
+            print("❌ فشل الاتصال بـ Binance. حاول مرة أخرى بعد ثوانٍ...")
+            print("🔄 محاولة استخدام futures endpoint...")
+            try:
+                test_price = await get_current_price_futures(session)
+                print(f"✅ نجح الاتصال عبر futures! السعر: {test_price:.2f}")
+                current_get_price = get_current_price_futures
+                current_fetch_order_book = fetch_order_book_futures
+            except Exception as e:
+                print(f"❌ فشل الاتصال نهائياً: {e}")
+                return
+        else:
+            print(f"✅ الاتصال بـ Binance ناجح! السعر الحالي: {test_price:.2f}")
         
-        asyncio.create_task(monitor_current_trade(session))
+        async def get_price(s):
+            return await current_get_price(s)
+        
+        async def fetch_ob(s):
+            return await current_fetch_order_book(s)
+        
+        await send_telegram_message(session, f"🤖 <b>بوت السكالبنج قيد التشغيل</b>\n📊 {SYMBOL}\n🎯 الهدف: {TP_POINTS} نقطة | 🛑 الستوب: {SL_POINTS} نقطة\n⚡ سرعة التحديث: 0.5 ثانية")
+        
+        async def monitor_with_funcs():
+            while True:
+                if current_trade["active"]:
+                    current_price = await get_price(session)
+                    if current_price:
+                        trade_type = current_trade["type"]
+                        tp = current_trade["tp"]
+                        sl = current_trade["sl"]
+                        if trade_type == "BUY" and current_price >= tp:
+                            if not current_trade["tp_hit"]:
+                                current_trade["tp_hit"] = True
+                                current_trade["active"] = False
+                                await send_telegram_message(session, f"✅ <b>TP1 {SYMBOL} DONE</b> 🥇")
+                                print(f"🎯 ضرب الهدف عند {current_price}")
+                        elif trade_type == "SELL" and current_price <= tp:
+                            if not current_trade["tp_hit"]:
+                                current_trade["tp_hit"] = True
+                                current_trade["active"] = False
+                                await send_telegram_message(session, f"✅ <b>TP1 {SYMBOL} DONE</b> 🥇")
+                                print(f"🎯 ضرب الهدف عند {current_price}")
+                        if trade_type == "BUY" and current_price <= sl:
+                            if not current_trade["sl_hit"]:
+                                current_trade["sl_hit"] = True
+                                current_trade["active"] = False
+                                await send_telegram_message(session, f"🛑 <b>SL Hit {SYMBOL}</b>")
+                                print(f"🛑 ضرب الستوب عند {current_price}")
+                        elif trade_type == "SELL" and current_price >= sl:
+                            if not current_trade["sl_hit"]:
+                                current_trade["sl_hit"] = True
+                                current_trade["active"] = False
+                                await send_telegram_message(session, f"🛑 <b>SL Hit {SYMBOL}</b>")
+                                print(f"🛑 ضرب الستوب عند {current_price}")
+                await asyncio.sleep(0.5)  # ← كل 0.5 ثانية لفحص الهدف
+        
+        asyncio.create_task(monitor_with_funcs())
         
         last_signal_key = None
-        
         while True:
             try:
                 if current_trade["active"]:
-                    await asyncio.sleep(2)
+                    await asyncio.sleep(0.5)  # ← كل 0.5 ثانية أثناء الصفقة
                     continue
                 
-                order_book = await fetch_order_book(session)
+                order_book = await fetch_ob(session)
                 if not order_book:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5)  # ← كل 0.5 ثانية عند الخطأ
                     continue
                 
-                current_price = await get_current_price(session)
+                current_price = await get_price(session)
                 if not current_price:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep(0.5)  # ← كل 0.5 ثانية عند الخطأ
                     continue
                 
                 imbalance = calculate_imbalance(order_book)
                 signal, sl, tp, reason = generate_signal(imbalance, current_price)
                 
-                # طباعة في الطرفية
-                bids = order_book.get('bids', [])
-                asks = order_book.get('asks', [])
                 print(f"\n⏰ {datetime.now().strftime('%H:%M:%S')} | السعر: {current_price:.2f} | OBI: {imbalance:.2f}")
                 
                 if signal:
@@ -234,7 +259,6 @@ async def main():
                         msg = format_signal_message(SYMBOL, signal, current_price, sl, tp, reason, imbalance)
                         await send_telegram_message(session, msg)
                         print(f"🔔 إشارة {signal} | الدخل: {current_price:.2f} | TP: {tp:.2f} | SL: {sl:.2f}")
-                        
                         current_trade = {
                             "active": True,
                             "type": signal,
@@ -245,19 +269,16 @@ async def main():
                             "sl_hit": False
                         }
                         last_signal_key = current_key
-                        await asyncio.sleep(3)
+                        await asyncio.sleep(1)  # استراحة قصيرة بعد الإشارة
                 else:
                     print(f"⚖️ عدم توازن {imbalance:.2f} - انتظار {IMBALANCE_THRESHOLD}+")
                 
-                await asyncio.sleep(2)
+                await asyncio.sleep(0.5)  # ← كل 0.5 ثانية (التحديث الرئيسي)
                 
             except Exception as e:
                 print(f"خطأ رئيسي: {e}")
-                await asyncio.sleep(2)
+                await asyncio.sleep(0.5)  # ← كل 0.5 ثانية عند الخطأ
 
-# =============================================
-# 9. التشغيل
-# =============================================
 if __name__ == "__main__":
     try:
         asyncio.run(main())
